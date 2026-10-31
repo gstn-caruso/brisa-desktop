@@ -108,10 +108,11 @@ este prototipo no necesita activar portales ni servicios anfitriones. Tampoco
 hereda `WAYLAND_SOCKET`, `DISPLAY` ni las variables `DBUS_STARTER_*`.
 
 El smoke anidado se verificó con ambos marcadores y terminación automática.
-**La revisión visual interactiva y las salidas manuales por Ctrl+C o cierre de la
-ventana exterior quedan pendientes.** El aislamiento es de compositor, socket,
-configuración y acceso al bus de sesión, **no un sandbox de seguridad**: el proceso
-mantiene los permisos del usuario.
+Se revisó una captura visual de la ejecución anidada. Al enviar SIGINT al lanzador,
+salió con código 130, se retiró su runtime privado y se conservó el socket de GNOME.
+**El cierre mediante el botón de la ventana exterior sigue pendiente de validación.**
+El aislamiento es de compositor, socket, configuración y acceso al bus de sesión,
+**no un sandbox de seguridad**: el proceso mantiene los permisos del usuario.
 
 ## VM live para validar infraestructura
 
@@ -150,3 +151,12 @@ KVM no demuestra que haya arrancado.
 No hay lanzadores de aplicaciones, persistencia de preferencias ni manipulación
 de archivos en este incremento. No se instala nada en el anfitrión ni se
 habilita Brisa como sesión de inicio de sesión.
+
+## Licencia
+
+Las fuentes de este proyecto se distribuyen bajo la GNU General Public License,
+versión 3 o cualquier versión posterior, a tu elección
+(`SPDX-License-Identifier: GPL-3.0-or-later`). El texto completo de GPLv3 está en
+[LICENSE](LICENSE).
+
+Las dependencias conservan sus respectivas licencias.
