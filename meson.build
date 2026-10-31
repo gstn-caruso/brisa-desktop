@@ -1,4 +1,6 @@
-project('brisa-desktop', 'vala', 'c', meson_version: '>= 1.0.0')
+# SPDX-License-Identifier: GPL-3.0-or-later
+project('brisa-desktop', 'vala', 'c', meson_version: '>= 1.0.0',
+  license: 'GPL-3.0-or-later')
 
 executable('brisa-desktop', 'src/main.vala',
   dependencies: [

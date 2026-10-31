@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 class Brisa : Gtk.Application {
     private bool smoke_test;
     private bool full_screen;
