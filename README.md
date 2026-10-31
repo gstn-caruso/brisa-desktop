@@ -1,30 +1,44 @@
 # Brisa · laboratorio de escritorio
 
-**Brisa es un nombre provisional. Este incremento ofrece dos paneles Vala/GTK4
-sobre labwc con gtk4-layer-shell, no un entorno de escritorio completo ni una
+**Brisa es un nombre provisional. Este incremento ofrece fondo, barra y dock
+Vala/GTK4 sobre labwc con gtk4-layer-shell, no un entorno de escritorio completo ni una
 sesión instalable.** Usa un compositor existente y puede ejecutarse anidado en
 GNOME Wayland sin reemplazarlo.
 
 ## Qué hay ahora
 
-- Dos superficies Wayland independientes en la capa `TOP`: `brisa-bar`, anclada
-  arriba y a ambos lados, y `brisa-dock`, centrada abajo. Ambas reservan espacio
-  mediante una zona exclusiva automática y no solicitan foco de teclado.
-- Barra con marca `🐧 Linux` y reloj local. El pingüino es texto Unicode
-  (U+1F427), dependiente de la fuente del sistema, no un asset oficial de Tux
-  ni un menú.
-- Dock con **etiquetas de demostración sin acciones**: Archivos, Navegador y
-  Papelera. No hay lanzadores, aplicaciones fijadas, recientes, papelera
-  operativa ni reubicación; tampoco botones que prometan esas funciones.
-- Si el compositor no ofrece layer-shell, se conserva el prototipo anterior:
-  una sola ventana GTK con fondo, barra y dock visuales. Es el fallback que
+- Tres superficies Wayland independientes: `brisa-background` en la capa
+  `BACKGROUND`, anclada a los cuatro bordes con zona exclusiva `-1` (cubre también
+  detrás de los paneles, sin reservar espacio); `brisa-bar` y `brisa-dock` en `TOP`.
+  La barra se ancla arriba y a ambos lados; el dock, inicialmente centrado abajo,
+  también puede ocupar el lateral izquierdo o derecho. Ambos paneles reservan
+  espacio mediante una zona exclusiva automática.
+- Fondo vectorial original de Brisa, azul con variante violeta. Clic derecho en
+  el fondo abre el popup «Apariencia» junto al puntero: «Cambiar fondo» alterna
+  la paleta y cierra el menú; «Cerrar» o Escape lo descartan. No es un selector
+  de archivos de imagen. Las superficies no solicitan foco de teclado salvo
+  temporalmente al abrir un menú (`ON_DEMAND`).
+- Barra con marca `Brisa`, fecha y reloj local.
+- Dock con iconos reales de temas disponibles (Yaru y el tema del sistema), sin
+  exigir que estén instaladas las aplicaciones representadas: Archivos,
+  Navegador, Editor de texto, Terminal, Videos, Calculadora y Papelera. Se omiten
+  los iconos que no se puedan resolver. **No lanzan aplicaciones** ni representan
+  aplicaciones fijadas o recientes reales; la papelera no es operativa.
+- Clic derecho en el dock, incluidos sus iconos, abre «Posición del dock» con
+  «Abajo», «Izquierda» y «Derecha» para reubicarlo durante la ejecución. También
+  acepta `--dock-position bottom|left|right` al arrancar (por defecto `bottom`);
+  un valor inválido se rechaza antes de mapear superficies e indica los válidos.
+- El separador anterior a Papelera permite redimensionar el dock arrastrándolo:
+  tamaño de iconos entre 24 y 80 píxeles, inicialmente 42. Con el dock abajo,
+  arrastrar hacia arriba lo agranda conservando su anclaje inferior.
+- Si el compositor no ofrece layer-shell, se usa un fallback de una sola
+  ventana GTK con fondo, barra, dock y los mismos controles. Es el fallback que
   comprueba Weston, no una integración de shell equivalente.
 - Lanzadores separados para labwc anidado y una VM live QEMU/KVM.
 
 Labwc es responsable de la composición y de la gestión de ventanas. Brisa aporta
-estos dos paneles; no implementa un compositor ni dibuja ahora un fondo propio
-cuando usa layer-shell. `--full-screen` solo afecta al fallback de una ventana y
-no se usa en el lanzador anidado.
+el fondo y estos dos paneles; no implementa un compositor. `--full-screen` solo
+afecta al fallback de una ventana y no se usa en el lanzador anidado.
 
 ## Requisitos locales
 
@@ -32,6 +46,8 @@ Meson >= 1.0, Ninja, compilador C, Vala, desarrollo GTK4 >= 4.12 y
 `gtk4-layer-shell-0` >= 1.0 (paquete de desarrollo `libgtk4-layer-shell-dev`).
 Para probar: Python 3 (solo biblioteca estándar), labwc con backend headless y
 Pixman, Weston con backend headless y `weston-simple-shm`.
+La prueba de interacción del fallback X11 usa además `Xvfb`, `xdotool`, `xwd`,
+`ffmpeg`, `tesseract` (OCR de etiquetas visibles) y `dbus-run-session`.
 Para iterar anidado: sesión Wayland, labwc con backend wayland, Bash y `setsid`.
 Para VM: QEMU x86_64 con interfaz GTK, acceso de lectura/escritura a `/dev/kvm`
 y una ISO live local. ShellCheck es opcional para validar el lanzador.
@@ -49,23 +65,35 @@ meson setup build
 meson compile -C build
 PYTHONDONTWRITEBYTECODE=1 python3 tests/test_headless_labwc.py -v
 PYTHONDONTWRITEBYTECODE=1 python3 tests/test_headless_weston.py -v
+PYTHONDONTWRITEBYTECODE=1 python3 tests/test_background_context_menu.py -v
 ```
 
 `meson setup build` es para la primera configuración; después basta con compilar.
-El ejecutable es `build/brisa-desktop`. Los dos archivos son la batería actual:
+El ejecutable es `build/brisa-desktop`. Los tres archivos son la batería actual:
 
-- Labwc headless: comprueba los namespaces, los anclajes, zonas exclusivas
-  positivas, recepción y confirmación de `configure` antes de mapear buffers
-  reales en ambas superficies. GTK imprime `BRISA_SMOKE_TEST_BAR_MAPPED` y
-  `BRISA_SMOKE_TEST_DOCK_MAPPED` desde sus señales `map`. En `--smoke-test`,
-  Brisa sale 300 ms después de que ambas se hayan mapeado y labwc también termina.
-- Weston headless: primero comprueba un frame real con `weston-simple-shm`;
-  después verifica el fallback, su señal `map`, el marcador
+- Labwc headless (4 casos): comprueba namespaces, anclajes, zona `-1` del fondo
+  y zonas positivas de los paneles, recepción y confirmación de `configure`
+  antes de mapear buffers reales en las tres superficies. Cubre el dock inicial
+  abajo, a izquierda y a derecha mediante CLI, y el rechazo de una posición
+  inválida. GTK imprime `BRISA_SMOKE_TEST_BACKGROUND_MAPPED`,
+  `BRISA_SMOKE_TEST_BAR_MAPPED` y `BRISA_SMOKE_TEST_DOCK_MAPPED` desde sus señales
+  `map`. En `--smoke-test`, Brisa sale 300 ms después de que las tres se hayan
+  mapeado y labwc también termina.
+- Weston headless (1 caso): primero comprueba un frame real con
+  `weston-simple-shm`; después verifica el fallback, su señal `map`, el marcador
   `BRISA_SMOKE_TEST_WINDOW_MAPPED` y la salida automática de cliente y compositor.
+- Interacción X11 (4 casos): usa ratón real en Xvfb y capturas para comprobar
+  apertura del menú del fondo junto al clic y cierre con Escape; cambio de fondo
+  sin alterar geometría ni primer plano de los paneles; selección de «Izquierda»
+  desde el menú del dock y su orientación vertical; crecimiento del dock y sus
+  iconos arrastrando el separador hacia arriba, conservando el anclaje inferior.
+  **Estas pruebas del fallback X11 no garantizan la entrada en Wayland.** No hay
+  cobertura específica de reducción, límites del tamaño ni arrastre lateral.
 
-Ambos tests utilizan sockets y runtimes privados, sin pantalla física ni acceso
-al bus de sesión anfitrión. Verifican integración y mapeo, **no apariencia visual
-ni funcionalidades de aplicaciones o archivos**.
+Las pruebas utilizan sockets y runtimes privados, sin pantalla física ni acceso
+al bus de sesión anfitrión. Las de Wayland verifican integración y mapeo; la de
+X11 comprueba además cambios visibles e interacción, **no funcionalidades de
+aplicaciones o archivos ni fidelidad visual completa**.
 
 La compilación local produce una advertencia de obsolescencia de
 `Gtk.StyleContext` y avisos del C generado por Vala; no se suprimen para aparentar
@@ -94,7 +122,7 @@ Se usa `WLR_BACKENDS=wayland`, `WLR_RENDERER=pixman` y `GSK_RENDERER=cairo`,
 sin depender de aceleración GL. Labwc recibe `-C` con una configuración mínima
 privada, sin Xwayland, autostart ni shutdown personalizados. Los directorios XDG
 de configuración también son privados: no se hereda la configuración de labwc
-del usuario ni del sistema. No se pasa `--full-screen`: barra y dock son paneles
+del usuario ni del sistema. No se pasa `--full-screen`: fondo, barra y dock son superficies
 independientes dentro de la ventana exterior de labwc.
 
 Para salir, cerrá la ventana exterior de labwc en GNOME o usá **Ctrl+C** en la
@@ -107,8 +135,9 @@ de D-Bus/systemd. El bus D-Bus apunta a una dirección privada sin servicio:
 este prototipo no necesita activar portales ni servicios anfitriones. Tampoco
 hereda `WAYLAND_SOCKET`, `DISPLAY` ni las variables `DBUS_STARTER_*`.
 
-El smoke anidado se verificó con ambos marcadores y terminación automática.
-Se revisó una captura visual de la ejecución anidada. Al enviar SIGINT al lanzador,
+En el incremento anterior se verificó el smoke anidado con los dos marcadores
+de panel y terminación automática, y se revisó una captura visual. Esa evidencia
+no valida las nuevas interacciones Wayland. Al enviar SIGINT al lanzador,
 salió con código 130, se retiró su runtime privado y se conservó el socket de GNOME.
 **El cierre mediante el botón de la ventana exterior sigue pendiente de validación.**
 El aislamiento es de compositor, socket, configuración y acceso al bus de sesión,
@@ -143,14 +172,15 @@ KVM no demuestra que haya arrancado.
 
 ## Próximos incrementos y límites
 
-- Dock reubicable y aplicaciones fijadas reales.
+- Aplicaciones fijadas reales y lanzadores.
 - Aplicaciones recientes y papelera operativa.
 - Integración de sesión propia y ciclo de sesión.
 - Aprovisionamiento del prototipo en el invitado y validación visual.
 
-No hay lanzadores de aplicaciones, persistencia de preferencias ni manipulación
-de archivos en este incremento. No se instala nada en el anfitrión ni se
-habilita Brisa como sesión de inicio de sesión.
+No hay lanzadores de aplicaciones, recientes reales, Finder ni manipulación
+de archivos en este incremento. Los cambios de fondo, posición y tamaño del dock
+solo viven durante la ejecución: no hay persistencia de preferencias. No se
+instala nada en el anfitrión ni se habilita Brisa como sesión de inicio de sesión.
 
 ## Licencia
 

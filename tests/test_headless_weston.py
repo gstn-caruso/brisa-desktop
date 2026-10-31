@@ -23,13 +23,13 @@ ROOT = Path(__file__).resolve().parents[1]
 MAPPED = "BRISA_SMOKE_TEST_WINDOW_MAPPED"
 
 
-def run_client(result_path, mode, executable):
+def run_client(result_path, mode, executable, *arguments):
     """Run inside Weston, preserving client status independently of Weston."""
     display = Path(os.environ["XDG_RUNTIME_DIR"]) / os.environ["WAYLAND_DISPLAY"]
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(2)
         connection.connect(str(display))
-    command = [executable] + (["--smoke-test"] if mode == "prototype" else [])
+    command = [executable] + (["--smoke-test"] if mode == "prototype" else []) + list(arguments)
     try:
         client = subprocess.run(command, capture_output=True, timeout=8 if mode == "prototype" else 2)
         result = {
