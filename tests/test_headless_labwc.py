@@ -1,9 +1,9 @@
 """Real layer-shell integration; Python standard library only.
 
 Run: PYTHONDONTWRITEBYTECODE=1 python3 tests/test_headless_labwc.py -v
-Contract: build/brisa-desktop --smoke-test maps brisa-bar and brisa-dock as
-separate layer surfaces, reserves their edges, reports their GTK map signals,
-and exits zero. Labwc must also exit zero. No host display or session bus.
+Contract: build/brisa-desktop --smoke-test maps brisa-background, brisa-bar,
+and brisa-dock as separate layer surfaces, reserves only the panel edges,
+reports their GTK map signals, and exits zero. Labwc must also exit zero. No host display or session bus.
 """
 
 import json
@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class HeadlessLabwcIntegration(unittest.TestCase):
-    def run_in_labwc(self, executable):
+    def run_in_labwc(self, executable, *arguments):
         with tempfile.TemporaryDirectory(prefix="brisa-layer-smoke-") as directory:
             runtime = Path(directory)
             runtime.chmod(0o700)
@@ -58,7 +58,7 @@ class HeadlessLabwcIntegration(unittest.TestCase):
             )
             session = shlex.join([
                 sys.executable, str(Path(__file__).resolve()),
-                "--labwc-client", str(result_path), str(executable),
+                "--labwc-client", str(result_path), str(executable), *arguments,
             ])
             with log_path.open("w") as log:
                 compositor = subprocess.Popen(
@@ -89,6 +89,15 @@ class HeadlessLabwcIntegration(unittest.TestCase):
             return result
 
     def givenHeadlessLabwc_whenShellStarts_thenBarAndDockReserveTheirEdges(self):
+        self.assert_shell_reserves_edges(2)
+
+    def givenHeadlessLabwc_whenDockPositionIsLeft_thenDockReservesLeftEdgeAndBarIsUnchanged(self):
+        self.assert_shell_reserves_edges(4, "--dock-position=left")
+
+    def givenHeadlessLabwc_whenDockPositionIsRight_thenDockReservesRightEdgeAndBarIsUnchanged(self):
+        self.assert_shell_reserves_edges(8, "--dock-position=right")
+
+    def givenUnknownDockPosition_whenShellStarts_thenRejectsBeforeMappingWithValidPositions(self):
         self.assertIsNotNone(shutil.which("labwc"), "Prerequisite missing: labwc")
         executable = ROOT / "build" / "brisa-desktop"
         self.assertTrue(
@@ -96,7 +105,29 @@ class HeadlessLabwcIntegration(unittest.TestCase):
             "Missing build/brisa-desktop; compile with meson compile -C build first",
         )
 
-        result = self.run_in_labwc(executable)
+        result = self.run_in_labwc(executable, "--dock-position=diagonal")
+        self.assertFalse(result["timed_out"], "Invalid dock position must exit promptly")
+        self.assertNotEqual(
+            result["returncode"], 0,
+            "Unknown dock position 'diagonal' was accepted instead of rejected; "
+            f"GTK map signals: {result['stdout']!r}",
+        )
+        for value in ("dock-position", "diagonal", "bottom", "left", "right"):
+            self.assertIn(value, result["stderr"], "Missing useful CLI diagnostic")
+        self.assertNotRegex(
+            result["stderr"], r"wl_surface[@#]\d+\.attach\(wl_buffer[@#]\d+,",
+            "Invalid dock position must be rejected before mapping any surface",
+        )
+
+    def assert_shell_reserves_edges(self, dock_anchor, *arguments):
+        self.assertIsNotNone(shutil.which("labwc"), "Prerequisite missing: labwc")
+        executable = ROOT / "build" / "brisa-desktop"
+        self.assertTrue(
+            executable.is_file() and os.access(executable, os.X_OK),
+            "Missing build/brisa-desktop; compile with meson compile -C build first",
+        )
+
+        result = self.run_in_labwc(executable, *arguments)
         self.assertFalse(result["timed_out"], f"Brisa did not exit automatically: {result}")
         self.assertEqual(result["returncode"], 0, f"Brisa failed: {result}")
         trace = result["stderr"]
@@ -110,16 +141,17 @@ class HeadlessLabwcIntegration(unittest.TestCase):
             r'wl_surface[@#](\d+), [^,]+, \d+, "([^"]+)"\)', trace,
         ))
         self.assertEqual(
-            len(surfaces), 2,
+            len(surfaces), 3,
             "Labwc advertised layer-shell and client/compositor exited 0, but "
-            f"Brisa created {len(surfaces)} layer surfaces; expected brisa-bar and "
-            f"brisa-dock. Client stdout: {result['stdout']!r}",
+            f"Brisa created {len(surfaces)} layer surfaces; expected brisa-background, "
+            f"brisa-bar and brisa-dock. Client stdout: {result['stdout']!r}",
         )
         self.assertCountEqual(
-            [surface[3] for surface in surfaces], ["brisa-bar", "brisa-dock"]
+            [surface[3] for surface in surfaces],
+            ["brisa-background", "brisa-bar", "brisa-dock"],
         )
-        self.assertEqual(len({surface[1] for surface in surfaces}), 2)
-        self.assertEqual(len({surface[2] for surface in surfaces}), 2)
+        self.assertEqual(len({surface[1] for surface in surfaces}), 3)
+        self.assertEqual(len({surface[2] for surface in surfaces}), 3)
 
         for surface in surfaces:
             layer_id, surface_id, namespace = surface.groups()
@@ -138,12 +170,27 @@ class HeadlessLabwcIntegration(unittest.TestCase):
             before_map = trace[surface.end():mapped_at]
 
             anchors = re.findall(layer + r"set_anchor\((\d+)\)", before_map)
-            expected_anchor = 13 if namespace == "brisa-bar" else 2
+            expected_anchor = (
+                15 if namespace == "brisa-background" else
+                13 if namespace == "brisa-bar" else dock_anchor
+            )
             self.assertTrue(anchors, f"{namespace}: missing anchor before mapping")
             self.assertEqual(int(anchors[-1]), expected_anchor, namespace)
             zones = re.findall(layer + r"set_exclusive_zone\((-?\d+)\)", before_map)
             self.assertTrue(zones, f"{namespace}: no exclusive zone before mapping")
-            self.assertGreater(int(zones[-1]), 0, f"{namespace}: must reserve space")
+            if namespace == "brisa-background":
+                self.assertRegex(
+                    surface[0], r', 0, "brisa-background"\)',
+                    "Background must use the BACKGROUND layer",
+                )
+                self.assertEqual(int(zones[-1]), -1, "Background must not reserve space")
+                keyboard_modes = re.findall(
+                    layer + r"set_keyboard_interactivity\((\d+)\)", before_map
+                )
+                self.assertTrue(keyboard_modes, "Background: missing keyboard mode")
+                self.assertEqual(int(keyboard_modes[-1]), 0, "Background keyboard must be NONE")
+            else:
+                self.assertGreater(int(zones[-1]), 0, f"{namespace}: must reserve space")
 
             configurations = list(re.finditer(
                 layer + r"configure\((\d+), \d+, \d+\)", before_map
@@ -162,7 +209,7 @@ class HeadlessLabwcIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--labwc-client":
-        run_client(sys.argv[2], "prototype", sys.argv[3])
+        run_client(sys.argv[2], "prototype", sys.argv[3], *sys.argv[4:])
     else:
         loader = unittest.TestLoader()
         loader.testMethodPrefix = "given"
