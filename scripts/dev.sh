@@ -3,11 +3,12 @@
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-binary="$root/build/brisa-desktop"
-if [[ ! -x "$binary" ]]; then
-    printf 'Falta el prototipo. Ejecutá meson setup build y meson compile -C build.\n' >&2
-    exit 1
-fi
+for binary in brisa-desktop brisa-dock; do
+    if [[ ! -x "$root/build/$binary" ]]; then
+        printf 'Falta build/%s. Ejecutá meson setup build y meson compile -C build.\n' "$binary" >&2
+        exit 1
+    fi
+done
 for tool in labwc setsid; do
     command -v "$tool" >/dev/null || { printf 'Falta %s.\n' "$tool" >&2; exit 1; }
 done
@@ -47,7 +48,7 @@ done
 shell_quote() {
     printf "'%s'" "${1//\'/\'\\\'\'}"
 }
-session=$(shell_quote "$binary")
+session="bash $(shell_quote "$root/scripts/session.sh")"
 for argument in "$@"; do
     session+=" $(shell_quote "$argument")"
 done

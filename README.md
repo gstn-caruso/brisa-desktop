@@ -7,7 +7,11 @@ GNOME Wayland sin reemplazarlo.
 
 ## Qué hay ahora
 
-- Tres superficies Wayland independientes: `brisa-background` en la capa
+- Dos programas en la misma sesión labwc: `build/brisa-desktop` aporta fondo
+  y barra; `build/brisa-dock` es un proceso hermano, no un hijo del escritorio.
+  El módulo reutilizable `src/dock/dock.vala` contiene el widget, los iconos y
+  el estilo; `src/dock/main.vala` es la aplicación autónoma.
+- Tres superficies Wayland: `brisa-background` en la capa
   `BACKGROUND`, anclada a los cuatro bordes con zona exclusiva `-1` (cubre también
   detrás de los paneles, sin reservar espacio); `brisa-bar` y `brisa-dock` en `TOP`.
   La barra se ancla arriba y a ambos lados; el dock, inicialmente centrado abajo,
@@ -31,9 +35,11 @@ GNOME Wayland sin reemplazarlo.
 - El separador anterior a Papelera permite redimensionar el dock arrastrándolo:
   tamaño de iconos entre 24 y 80 píxeles, inicialmente 42. Con el dock abajo,
   arrastrar hacia arriba lo agranda conservando su anclaje inferior.
-- Si el compositor no ofrece layer-shell, se usa un fallback de una sola
-  ventana GTK con fondo, barra, dock y los mismos controles. Es el fallback que
-  comprueba Weston, no una integración de shell equivalente.
+- Si el compositor no ofrece layer-shell, `brisa-desktop` ofrece una **vista
+  previa conjunta** en una sola ventana GTK con fondo, barra, dock y los mismos
+  controles. Weston y X11 comprueban esta vista previa, no la independencia de
+  procesos ni una integración de shell equivalente. Ejecutar además `brisa-dock`
+  en esos entornos abre otra ventana; no es el modo de preview recomendado.
 - Lanzadores separados para labwc anidado y una VM live QEMU/KVM.
 
 Labwc es responsable de la composición y de la gestión de ventanas. Brisa aporta
@@ -69,16 +75,20 @@ PYTHONDONTWRITEBYTECODE=1 python3 tests/test_background_context_menu.py -v
 ```
 
 `meson setup build` es para la primera configuración; después basta con compilar.
-El ejecutable es `build/brisa-desktop`. Los tres archivos son la batería actual:
+Los ejecutables son `build/brisa-desktop` y `build/brisa-dock`.
+Los tres archivos son la batería actual:
 
-- Labwc headless (4 casos): comprueba namespaces, anclajes, zona `-1` del fondo
+- Labwc headless (7 casos): comprueba namespaces, anclajes, zona `-1` del fondo
   y zonas positivas de los paneles, recepción y confirmación de `configure`
-  antes de mapear buffers reales en las tres superficies. Cubre el dock inicial
-  abajo, a izquierda y a derecha mediante CLI, y el rechazo de una posición
-  inválida. GTK imprime `BRISA_SMOKE_TEST_BACKGROUND_MAPPED`,
-  `BRISA_SMOKE_TEST_BAR_MAPPED` y `BRISA_SMOKE_TEST_DOCK_MAPPED` desde sus señales
-  `map`. En `--smoke-test`, Brisa sale 300 ms después de que las tres se hayan
-  mapeado y labwc también termina.
+  antes de mapear buffers reales. El escritorio sólo mapea fondo y barra; el
+  dock autónomo sólo mapea el dock, abajo, a izquierda y a derecha mediante CLI.
+  Cubre el rechazo de una posición inválida del dock antes del mapeo, su cierre
+  y reinicio externo sin terminar el escritorio ni duplicar el dock, y el smoke
+  de la sesión con dock izquierdo. GTK imprime
+  `BRISA_SMOKE_TEST_BACKGROUND_MAPPED`, `BRISA_SMOKE_TEST_BAR_MAPPED` y
+  `BRISA_SMOKE_TEST_DOCK_MAPPED` desde las señales `map` de cada proceso.
+  En `--smoke-test`, cada programa sale 300 ms después del mapeo de sus propias
+  superficies; la sesión espera ambos, propaga errores y labwc también termina.
 - Weston headless (1 caso): primero comprueba un frame real con
   `weston-simple-shm`; después verifica el fallback, su señal `map`, el marcador
   `BRISA_SMOKE_TEST_WINDOW_MAPPED` y la salida automática de cliente y compositor.
@@ -90,12 +100,19 @@ El ejecutable es `build/brisa-desktop`. Los tres archivos son la batería actual
   **Estas pruebas del fallback X11 no garantizan la entrada en Wayland.** No hay
   cobertura específica de reducción, límites del tamaño ni arrastre lateral.
 
+Además de los tests, se comprobaron puntualmente en labwc headless el cierre
+independiente del dock, el cierre del escritorio con limpieza del dock y las
+señales SIGTERM/SIGINT al coordinador (salidas 143/130, sin hijos supervivientes).
+Se verificaron opciones de sesión inválidas sin mapeo y la propagación de error
+del smoke con un backend GTK inválido. Estas comprobaciones no añaden casos
+permanentes a la batería ni verifican interacción de ratón en Wayland.
+
 Las pruebas utilizan sockets y runtimes privados, sin pantalla física ni acceso
 al bus de sesión anfitrión. Las de Wayland verifican integración y mapeo; la de
 X11 comprueba además cambios visibles e interacción, **no funcionalidades de
 aplicaciones o archivos ni fidelidad visual completa**.
 
-La compilación local produce una advertencia de obsolescencia de
+La compilación puede emitir advertencias de obsolescencia de
 `Gtk.StyleContext` y avisos del C generado por Vala; no se suprimen para aparentar
 una compilación sin advertencias.
 
@@ -105,18 +122,27 @@ una compilación sin advertencias.
 bash scripts/dev.sh
 
 # Comprobación breve, con salida automática:
-bash scripts/dev.sh --smoke-test
+bash scripts/dev.sh --smoke-test --dock-position=left
 
-# Validación del lanzador:
-bash -n scripts/dev.sh
-shellcheck scripts/dev.sh
+# Dentro de un compositor ya iniciado que ofrezca layer-shell:
+bash scripts/session.sh --dock-position=right
+
+# Vista previa conjunta (X11 o Wayland sin layer-shell):
+build/brisa-desktop --full-screen --dock-position=left
+
+# Validación de los lanzadores (ShellCheck, si está disponible):
+bash -n scripts/session.sh scripts/dev.sh
+shellcheck scripts/session.sh scripts/dev.sh
 ```
 
 El lanzador resuelve `WAYLAND_DISPLAY` (por defecto `wayland-0`) contra el
 `XDG_RUNTIME_DIR` anfitrión, salvo que ya sea una ruta absoluta. Pasa esa ruta
 absoluta al backend Wayland de labwc para que pueda conectarse al anfitrión aun
 con un runtime temporal privado de permisos 700. Labwc define después el
-`WAYLAND_DISPLAY` privado que hereda Brisa al arrancar mediante `-S`.
+`WAYLAND_DISPLAY` privado que hereda `bash scripts/session.sh` mediante `-S`.
+La sesión comprueba los dos binarios y valida todas sus opciones antes de lanzar
+clientes. Sólo acepta `--smoke-test` y `--dock-position bottom|left|right` (también
+con `=`); envía la posición únicamente al dock y el smoke a ambos programas.
 
 Se usa `WLR_BACKENDS=wayland`, `WLR_RENDERER=pixman` y `GSK_RENDERER=cairo`,
 sin depender de aceleración GL. Labwc recibe `-C` con una configuración mínima
@@ -126,8 +152,12 @@ del usuario ni del sistema. No se pasa `--full-screen`: fondo, barra y dock son 
 independientes dentro de la ventana exterior de labwc.
 
 Para salir, cerrá la ventana exterior de labwc en GNOME o usá **Ctrl+C** en la
-terminal. Al terminar el cliente de sesión, labwc también termina. La limpieza
-se limita al grupo de procesos propio y al runtime temporal creado por el
+terminal. Cerrar el dock no termina el escritorio ni la sesión; no se reinicia
+el dock automáticamente ni hay IPC. Terminar el escritorio termina la sesión y
+limpia el dock; en smoke se espera a ambos y se devuelve un error si cualquiera
+falla. La sesión señala sólo sus hijos propios. Al terminar el coordinador de
+sesión, labwc también termina. La limpieza del lanzador anidado se limita al grupo
+de procesos propio y al runtime temporal creado por el
 lanzador; no cambia la configuración de GNOME ni archivos globales.
 
 `LABWC_UPDATE_ACTIVATION_ENV=0` impide que labwc actualice el entorno de activación
@@ -135,9 +165,10 @@ de D-Bus/systemd. El bus D-Bus apunta a una dirección privada sin servicio:
 este prototipo no necesita activar portales ni servicios anfitriones. Tampoco
 hereda `WAYLAND_SOCKET`, `DISPLAY` ni las variables `DBUS_STARTER_*`.
 
-En el incremento anterior se verificó el smoke anidado con los dos marcadores
-de panel y terminación automática, y se revisó una captura visual. Esa evidencia
-no valida las nuevas interacciones Wayland. Al enviar SIGINT al lanzador,
+En un incremento anterior se verificó el smoke anidado y se revisó una captura
+visual. En este incremento se verificó la sesión de dos procesos en labwc
+headless; no se repitió el arranque anidado en GNOME ni una revisión visual.
+Esa evidencia no valida las interacciones Wayland. Al enviar SIGINT al lanzador,
 salió con código 130, se retiró su runtime privado y se conservó el socket de GNOME.
 **El cierre mediante el botón de la ventana exterior sigue pendiente de validación.**
 El aislamiento es de compositor, socket, configuración y acceso al bus de sesión,
@@ -174,7 +205,7 @@ KVM no demuestra que haya arrancado.
 
 - Aplicaciones fijadas reales y lanzadores.
 - Aplicaciones recientes y papelera operativa.
-- Integración de sesión propia y ciclo de sesión.
+- Sesión instalable y gestión completa de su ciclo de vida.
 - Aprovisionamiento del prototipo en el invitado y validación visual.
 
 No hay lanzadores de aplicaciones, recientes reales, Finder ni manipulación
