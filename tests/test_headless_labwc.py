@@ -1,9 +1,10 @@
 """Real layer-shell integration; Python standard library only.
 
 Run: PYTHONDONTWRITEBYTECODE=1 python3 tests/test_headless_labwc.py -v
-Contract: build/brisa-desktop --smoke-test maps brisa-background, brisa-bar,
-and brisa-dock as separate layer surfaces, reserves only the panel edges,
-reports their GTK map signals, and exits zero. Labwc must also exit zero. No host display or session bus.
+Contract: build/brisa-desktop --smoke-test maps only brisa-background and
+brisa-bar; build/brisa-dock --smoke-test maps only brisa-dock. Each client
+reports its GTK map signals and exits zero, reserving only panel edges.
+Traces stay separate per process. Labwc must also exit zero. No host display or session bus.
 """
 
 import json
@@ -13,9 +14,11 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from test_headless_weston import run_client
@@ -24,8 +27,90 @@ from test_headless_weston import run_client
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def mapped_names(trace):
+    """IDs are local to one client's trace, never shared between processes."""
+    names = []
+    for surface in re.finditer(
+        r'zwlr_layer_shell_v1[@#]\d+\.get_layer_surface\('
+        r'new id zwlr_layer_surface_v1[@#]\d+, '
+        r'wl_surface[@#](\d+), [^,]+, \d+, "([^"]+)"\)', trace,
+    ):
+        protocol = rf"wl_surface[@#]{surface[1]}\."
+        attachment = re.search(
+            protocol + r"attach\(wl_buffer[@#]\d+,", trace[surface.end():]
+        )
+        if attachment and re.search(
+            protocol + r"commit\(\)",
+            trace[surface.end() + attachment.end():],
+        ):
+            names.append(surface[2])
+    return names
+
+
+def run_dock_lifecycle(result_path, desktop_executable, dock_executable):
+    """Private labwc client: normal binaries, external dock restart, bounded cleanup."""
+    result = {"private_socket_connected": False, "error": None}
+    clients = []
+    logs = []
+    runtime = Path(result_path).parent
+
+    def start(executable, name):
+        trace = runtime / f"{name}.trace"
+        log = trace.open("w")
+        logs.append(log)
+        client = subprocess.Popen([executable], stdout=subprocess.DEVNULL, stderr=log)
+        clients.append(client)
+        return client, trace
+
+    def wait_for_maps(client, trace, expected):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if client.poll() is not None:
+                raise AssertionError(f"{trace.stem} exited before mapping: {client.returncode}")
+            if set(expected).issubset(mapped_names(trace.read_text())):
+                return
+            time.sleep(0.02)
+        raise AssertionError(f"{trace.stem} did not map {expected} within 3s: {trace.read_text()}")
+
+    try:
+        display = Path(os.environ["XDG_RUNTIME_DIR"]) / os.environ["WAYLAND_DISPLAY"]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(2)
+            connection.connect(str(display))
+        result["private_socket_connected"] = True
+        desktop, desktop_trace = start(desktop_executable, "desktop")
+        wait_for_maps(desktop, desktop_trace, ["brisa-background", "brisa-bar"])
+        dock, dock_trace = start(dock_executable, "dock-first")
+        wait_for_maps(dock, dock_trace, ["brisa-dock"])
+        dock.terminate()
+        dock.wait(timeout=2)
+        result["desktop_alive_after_dock_exit"] = desktop.poll() is None
+        replacement, replacement_trace = start(dock_executable, "dock-restarted")
+        wait_for_maps(replacement, replacement_trace, ["brisa-dock"])
+        # Allow an accidental desktop shutdown/respawn time to become observable.
+        time.sleep(0.2)
+        result["desktop_alive_after_restart"] = desktop.poll() is None
+        result["replacement_alive"] = replacement.poll() is None
+        result["desktop_trace"] = desktop_trace.read_text()
+        result["dock_traces"] = [dock_trace.read_text(), replacement_trace.read_text()]
+    except (AssertionError, OSError, subprocess.TimeoutExpired) as error:
+        result["error"] = str(error)
+    finally:
+        for client in reversed(clients):
+            if client.poll() is None:
+                client.terminate()
+                try:
+                    client.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    client.kill()
+                    client.wait(timeout=1)
+        for log in logs:
+            log.close()
+        Path(result_path).write_text(json.dumps(result))
+
+
 class HeadlessLabwcIntegration(unittest.TestCase):
-    def run_in_labwc(self, executable, *arguments):
+    def run_in_labwc(self, executable, *arguments, client_mode="--labwc-client"):
         with tempfile.TemporaryDirectory(prefix="brisa-layer-smoke-") as directory:
             runtime = Path(directory)
             runtime.chmod(0o700)
@@ -58,7 +143,7 @@ class HeadlessLabwcIntegration(unittest.TestCase):
             )
             session = shlex.join([
                 sys.executable, str(Path(__file__).resolve()),
-                "--labwc-client", str(result_path), str(executable), *arguments,
+                client_mode, str(result_path), str(executable), *arguments,
             ])
             with log_path.open("w") as log:
                 compositor = subprocess.Popen(
@@ -88,6 +173,31 @@ class HeadlessLabwcIntegration(unittest.TestCase):
             self.assertTrue(result["private_socket_connected"], diagnostics)
             return result
 
+    def givenHeadlessLabwc_whenSessionStartsWithLeftDock_thenBackgroundBarAndDockMapAndExitCleanly(self):
+        self.assertIsNotNone(shutil.which("labwc"), "Prerequisite missing: labwc")
+        for binary in ("brisa-desktop", "brisa-dock"):
+            executable = ROOT / "build" / binary
+            self.assertTrue(
+                executable.is_file() and os.access(executable, os.X_OK),
+                f"Missing build/{binary}; compile with meson compile -C build first",
+            )
+
+        result = self.run_in_labwc(
+            "bash", "scripts/session.sh", "--smoke-test", "--dock-position=left",
+            client_mode="--labwc-session-client",
+        )
+        self.assertFalse(result["timed_out"], f"Session did not exit automatically: {result}")
+        self.assertEqual(
+            result["returncode"], 0,
+            "Required API: bash scripts/session.sh --smoke-test --dock-position=left; "
+            f"start brisa-desktop and brisa-dock and exit 0. Result: {result}",
+        )
+        for surface in ("BACKGROUND", "BAR", "DOCK"):
+            self.assertIn(
+                f"BRISA_SMOKE_TEST_{surface}_MAPPED", result["stdout"].splitlines(),
+                f"Session did not report {surface} mapping: {result}",
+            )
+
     def givenHeadlessLabwc_whenShellStarts_thenBarAndDockReserveTheirEdges(self):
         self.assert_shell_reserves_edges(2)
 
@@ -97,12 +207,12 @@ class HeadlessLabwcIntegration(unittest.TestCase):
     def givenHeadlessLabwc_whenDockPositionIsRight_thenDockReservesRightEdgeAndBarIsUnchanged(self):
         self.assert_shell_reserves_edges(8, "--dock-position=right")
 
-    def givenUnknownDockPosition_whenShellStarts_thenRejectsBeforeMappingWithValidPositions(self):
+    def givenUnknownDockPosition_whenDockStarts_thenRejectsBeforeMappingWithValidPositions(self):
         self.assertIsNotNone(shutil.which("labwc"), "Prerequisite missing: labwc")
-        executable = ROOT / "build" / "brisa-desktop"
+        executable = ROOT / "build" / "brisa-dock"
         self.assertTrue(
             executable.is_file() and os.access(executable, os.X_OK),
-            "Missing build/brisa-desktop; compile with meson compile -C build first",
+            "Missing build/brisa-dock; compile with meson compile -C build first",
         )
 
         result = self.run_in_labwc(executable, "--dock-position=diagonal")
@@ -119,12 +229,90 @@ class HeadlessLabwcIntegration(unittest.TestCase):
             "Invalid dock position must be rejected before mapping any surface",
         )
 
-    def assert_shell_reserves_edges(self, dock_anchor, *arguments):
+    def givenHeadlessLabwc_whenStandaloneDockStarts_thenOnlyDockMapsReservesBottomAndExitsCleanly(self):
         self.assertIsNotNone(shutil.which("labwc"), "Prerequisite missing: labwc")
-        executable = ROOT / "build" / "brisa-desktop"
+        executable = ROOT / "build" / "brisa-dock"
         self.assertTrue(
             executable.is_file() and os.access(executable, os.X_OK),
-            "Missing build/brisa-desktop; compile with meson compile -C build first",
+            "Missing executable: build/brisa-dock. Required API: "
+            "build/brisa-dock --smoke-test; map only brisa-dock, reserve the "
+            "bottom edge, report BRISA_SMOKE_TEST_DOCK_MAPPED, then exit 0.",
+        )
+
+        result = self.run_in_labwc(executable)
+        self.assertFalse(result["timed_out"], f"Dock did not exit automatically: {result}")
+        self.assertEqual(result["returncode"], 0, f"Dock failed: {result}")
+        trace = result["stderr"]
+        surfaces = list(re.finditer(
+            r'zwlr_layer_shell_v1[@#]\d+\.get_layer_surface\('
+            r'new id zwlr_layer_surface_v1[@#](\d+), '
+            r'wl_surface[@#](\d+), [^,]+, \d+, "([^"]+)"\)', trace,
+        ))
+        self.assertEqual(
+            [surface[3] for surface in surfaces], ["brisa-dock"],
+            "Standalone dock must create only brisa-dock, without background or bar",
+        )
+        surface = surfaces[0]
+        layer_id, surface_id, _ = surface.groups()
+        layer = rf"zwlr_layer_surface_v1[@#]{layer_id}\."
+        wayland_surface = rf"wl_surface[@#]{surface_id}\."
+        attachment = re.search(
+            wayland_surface + r"attach\(wl_buffer[@#]\d+,", trace[surface.end():]
+        )
+        self.assertIsNotNone(attachment, "Dock: no actual buffer attached")
+        attached_at = surface.end() + attachment.end()
+        commit = re.search(wayland_surface + r"commit\(\)", trace[attached_at:])
+        self.assertIsNotNone(commit, "Dock: attached buffer never committed")
+        before_map = trace[surface.end():attached_at + commit.start()]
+        anchors = re.findall(layer + r"set_anchor\((\d+)\)", before_map)
+        self.assertTrue(anchors, "Dock: missing anchor before mapping")
+        self.assertEqual(int(anchors[-1]), 2, "Dock must anchor only to the bottom edge")
+        zones = re.findall(layer + r"set_exclusive_zone\((-?\d+)\)", before_map)
+        self.assertTrue(zones, "Dock: missing exclusive zone before mapping")
+        self.assertGreater(int(zones[-1]), 0, "Dock must reserve bottom edge space")
+        self.assertIn("BRISA_SMOKE_TEST_DOCK_MAPPED", result["stdout"].splitlines())
+
+    def givenDesktopAndDock_whenDockIsClosedAndRestarted_thenDesktopStaysMappedWithoutDuplicateDock(self):
+        self.assertIsNotNone(shutil.which("labwc"), "Prerequisite missing: labwc")
+        desktop = ROOT / "build" / "brisa-desktop"
+        dock = ROOT / "build" / "brisa-dock"
+        for executable in (desktop, dock):
+            self.assertTrue(
+                executable.is_file() and os.access(executable, os.X_OK),
+                f"Missing {executable}; compile with meson compile -C build first",
+            )
+
+        result = self.run_in_labwc(
+            desktop, str(dock), client_mode="--labwc-dock-lifecycle"
+        )
+        self.assertIsNone(result["error"], f"Lifecycle harness failed: {result['error']}")
+        self.assertTrue(result["desktop_alive_after_dock_exit"], "Closing dock closed desktop")
+        self.assertTrue(result["desktop_alive_after_restart"], "Restarting dock closed desktop")
+        self.assertTrue(result["replacement_alive"], "Replacement dock exited unexpectedly")
+        for trace in result["dock_traces"]:
+            self.assertEqual(mapped_names(trace), ["brisa-dock"], "Each dock must map exactly once")
+        self.assertCountEqual(
+            mapped_names(result["desktop_trace"]), ["brisa-background", "brisa-bar"],
+            "Desktop must map only background and bar; its embedded dock duplicates "
+            "the independent dock and survives that dock's shutdown/restart",
+        )
+
+    def assert_shell_reserves_edges(self, dock_anchor, *arguments):
+        # Check dock first so its position coverage runs even while desktop still
+        # creates a duplicate dock. Never combine protocol IDs across clients.
+        self.assert_client_reserves_edges(
+            "brisa-dock", ["brisa-dock"], dock_anchor, *arguments
+        )
+        self.assert_client_reserves_edges(
+            "brisa-desktop", ["brisa-background", "brisa-bar"], dock_anchor
+        )
+
+    def assert_client_reserves_edges(self, binary, expected_names, dock_anchor, *arguments):
+        self.assertIsNotNone(shutil.which("labwc"), "Prerequisite missing: labwc")
+        executable = ROOT / "build" / binary
+        self.assertTrue(
+            executable.is_file() and os.access(executable, os.X_OK),
+            f"Missing build/{binary}; compile with meson compile -C build first",
         )
 
         result = self.run_in_labwc(executable, *arguments)
@@ -141,17 +329,16 @@ class HeadlessLabwcIntegration(unittest.TestCase):
             r'wl_surface[@#](\d+), [^,]+, \d+, "([^"]+)"\)', trace,
         ))
         self.assertEqual(
-            len(surfaces), 3,
+            len(surfaces), len(expected_names),
             "Labwc advertised layer-shell and client/compositor exited 0, but "
-            f"Brisa created {len(surfaces)} layer surfaces; expected brisa-background, "
-            f"brisa-bar and brisa-dock. Client stdout: {result['stdout']!r}",
+            f"{binary} created {len(surfaces)} layer surfaces; expected {expected_names}. "
+            f"Client stdout: {result['stdout']!r}",
         )
         self.assertCountEqual(
-            [surface[3] for surface in surfaces],
-            ["brisa-background", "brisa-bar", "brisa-dock"],
+            [surface[3] for surface in surfaces], expected_names,
         )
-        self.assertEqual(len({surface[1] for surface in surfaces}), 3)
-        self.assertEqual(len({surface[2] for surface in surfaces}), 3)
+        self.assertEqual(len({surface[1] for surface in surfaces}), len(expected_names))
+        self.assertEqual(len({surface[2] for surface in surfaces}), len(expected_names))
 
         for surface in surfaces:
             layer_id, surface_id, namespace = surface.groups()
@@ -210,6 +397,10 @@ class HeadlessLabwcIntegration(unittest.TestCase):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--labwc-client":
         run_client(sys.argv[2], "prototype", sys.argv[3], *sys.argv[4:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "--labwc-session-client":
+        run_client(sys.argv[2], "session", sys.argv[3], *sys.argv[4:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "--labwc-dock-lifecycle":
+        run_dock_lifecycle(*sys.argv[2:])
     else:
         loader = unittest.TestLoader()
         loader.testMethodPrefix = "given"
